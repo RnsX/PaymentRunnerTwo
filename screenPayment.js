@@ -1,7 +1,70 @@
 "use strict";
 
 let crypto = require("node:crypto");
+let fs = require("node:fs");
 let https = require("node:https");
+
+let loadedPayments = [];
+
+function loadCsvFile(filePath) {
+  let csvText = fs.readFileSync(filePath, "utf8");
+  let rows = parseCsv(csvText);
+
+  if (rows.length === 0) {
+    loadedPayments.length = 0;
+    return loadedPayments;
+  }
+
+  let headers = rows[0];
+  let messageIdIndex = headers.indexOf("message_id");
+  let payloadBase64Index = headers.indexOf("payload_base64");
+
+  if (messageIdIndex === -1 || payloadBase64Index === -1) {
+    throw new Error("CSV must contain message_id and payload_base64 columns");
+  }
+
+  loadedPayments.length = 0;
+
+  for (let rowIndex = 1; rowIndex < rows.length; rowIndex++) {
+    let row = rows[rowIndex];
+
+    if (row.length === 1 && row[0] === "") {
+      continue;
+    }
+
+    loadedPayments.push({
+      message_id: row[messageIdIndex] || "",
+      payload_base64: row[payloadBase64Index] || "",
+    });
+  }
+
+  return loadedPayments;
+}
+
+function parseXmlTagValue(xml, tagName) {
+  if (typeof xml !== "string") {
+    throw new TypeError("xml must be a string");
+  }
+
+  if (typeof tagName !== "string" || tagName.length === 0) {
+    throw new TypeError("tagName must be a non-empty string");
+  }
+
+  let escapedTagName = escapeRegex(tagName);
+  let regex = new RegExp(
+    `<(?:[A-Za-z_][\\w.-]*:)?${escapedTagName}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/(?:[A-Za-z_][\\w.-]*:)?${escapedTagName}>`,
+    "i",
+  );
+  let match = xml.match(regex);
+
+  if (!match) {
+    return null;
+  }
+
+  return match[1];
+}
+
+// END parseXmlTagValue
 
 async function screenPayment(payment) {
   if (typeof payment !== "string") {
@@ -173,6 +236,58 @@ function sha256Hex(value) {
   return crypto.createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+function parseCsv(csvText) {
+  let rows = [];
+  let row = [];
+  let value = "";
+  let insideQuotes = false;
+
+  for (let index = 0; index < csvText.length; index++) {
+    let char = csvText[index];
+    let nextChar = csvText[index + 1];
+
+    if (char === "\"" && insideQuotes && nextChar === "\"") {
+      value += "\"";
+      index++;
+      continue;
+    }
+
+    if (char === "\"") {
+      insideQuotes = !insideQuotes;
+      continue;
+    }
+
+    if (char === "," && !insideQuotes) {
+      row.push(value);
+      value = "";
+      continue;
+    }
+
+    if ((char === "\n" || char === "\r") && !insideQuotes) {
+      if (char === "\r" && nextChar === "\n") {
+        index++;
+      }
+
+      row.push(value);
+      rows.push(row);
+      row = [];
+      value = "";
+      continue;
+    }
+
+    value += char;
+  }
+
+  row.push(value);
+  rows.push(row);
+
+  return rows;
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function sendRequest(method, url, headers, body) {
   return new Promise(function (resolve, reject) {
     let request = https.request(
@@ -216,5 +331,8 @@ function sendRequest(method, url, headers, body) {
 }
 
 module.exports = {
+  loadedPayments: loadedPayments,
+  loadCsvFile: loadCsvFile,
+  parseXmlTagValue: parseXmlTagValue,
   screenPayment: screenPayment,
 };
