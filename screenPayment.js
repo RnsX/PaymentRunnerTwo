@@ -1,116 +1,85 @@
 "use strict";
 
-const crypto = require("node:crypto");
-const http = require("node:http");
-const https = require("node:https");
+let crypto = require("node:crypto");
+let https = require("node:https");
 
-const ALGORITHM = "AWS4-HMAC-SHA256";
-const DEFAULT_CONTENT_TYPE = "application/json";
-
-async function screenPayment(payment = {}, options = {}) {
-  if (payment == null || typeof payment !== "object" || Array.isArray(payment)) {
-    throw new TypeError("payment must be a JavaScript object");
+async function screenPayment(payment) {
+  if (typeof payment !== "string") {
+    throw new TypeError("payment must be a string");
   }
 
-  const config = readConfig(options);
-  const url = new URL(config.endpoint);
-  const body = JSON.stringify(payment);
-  const amzDate = toAmzDate(config.now || new Date());
-  const dateStamp = amzDate.slice(0, 8);
+  let method = "POST";
+  let endpoint = "https://example.execute-api.us-east-1.amazonaws.com/prod/screen";
+  let region = "us-east-1";
+  let service = "execute-api";
+  let accessKeyId = "PUT_ACCESS_KEY_HERE";
+  let secretAccessKey = "PUT_SECRET_KEY_HERE";
+  let soapAction = "ScreenPayment";
+  let contentType = "text/xml; charset=utf-8";
 
-  const headers = {
-    SOAPAction: config.soapAction,
-    "Content-Type": config.contentType,
+  let url = new URL(endpoint);
+  let now = new Date();
+  let amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
+  let dateStamp = amzDate.slice(0, 8);
+  let body = payment;
+
+  let headers = {
+    SOAPAction: soapAction,
+    "Content-Type": contentType,
     "X-Amz-Date": amzDate,
     Host: url.host,
   };
 
-  if (config.sessionToken) {
-    headers["X-Amz-Security-Token"] = config.sessionToken;
-  }
-
-  headers.Authorization = createAuthorizationHeader({
-    method: config.method,
+  headers.Authorization = createAuthorizationHeader(
+    method,
     url,
     headers,
     body,
-    accessKeyId: config.accessKeyId,
-    secretAccessKey: config.secretAccessKey,
-    region: config.region,
-    service: config.service,
+    accessKeyId,
+    secretAccessKey,
+    region,
+    service,
     dateStamp,
     amzDate,
-  });
+  );
 
-  return request({
-    url,
-    method: config.method,
-    headers,
-    body,
-    timeoutMs: config.timeoutMs,
-  });
+  return sendRequest(method, url, headers, body);
 }
 
-function readConfig(options) {
-  const config = {
-    endpoint: options.endpoint || process.env.PAYMENT_SCREEN_URL,
-    method: (options.method || process.env.PAYMENT_SCREEN_METHOD || "POST").toUpperCase(),
-    region: options.region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION,
-    service: options.service || process.env.AWS_SERVICE || "execute-api",
-    accessKeyId: options.accessKeyId || process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: options.secretAccessKey || process.env.AWS_SECRET_ACCESS_KEY,
-    sessionToken: options.sessionToken || process.env.AWS_SESSION_TOKEN,
-    soapAction: options.soapAction || process.env.SOAP_ACTION || "",
-    contentType: options.contentType || process.env.PAYMENT_SCREEN_CONTENT_TYPE || DEFAULT_CONTENT_TYPE,
-    timeoutMs: options.timeoutMs || 30000,
-    now: options.now,
-  };
-
-  const missing = [];
-  for (const key of ["endpoint", "region", "accessKeyId", "secretAccessKey"]) {
-    if (!config[key]) {
-      missing.push(key);
-    }
-  }
-
-  if (missing.length) {
-    throw new Error(`Missing required configuration: ${missing.join(", ")}`);
-  }
-
-  return config;
-}
-
-function createAuthorizationHeader(input) {
-  const canonical = createCanonicalRequest({
-    method: input.method,
-    url: input.url,
-    headers: input.headers,
-    body: input.body,
-  });
-  const credentialScope = `${input.dateStamp}/${input.region}/${input.service}/aws4_request`;
-  const stringToSign = [
-    ALGORITHM,
-    input.amzDate,
+function createAuthorizationHeader(
+  method,
+  url,
+  headers,
+  body,
+  accessKeyId,
+  secretAccessKey,
+  region,
+  service,
+  dateStamp,
+  amzDate,
+) {
+  let algorithm = "AWS4-HMAC-SHA256";
+  let canonical = createCanonicalRequest(method, url, headers, body);
+  let credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+  let stringToSign = [
+    algorithm,
+    amzDate,
     credentialScope,
     sha256Hex(canonical.canonicalRequest),
   ].join("\n");
-  const signingKey = getSignatureKey(input.secretAccessKey, input.dateStamp, input.region, input.service);
-  const signature = hmac(signingKey, stringToSign, "hex");
+  let signingKey = getSignatureKey(secretAccessKey, dateStamp, region, service);
+  let signature = hmac(signingKey, stringToSign, "hex");
 
-  return [
-    `${ALGORITHM} Credential=${input.accessKeyId}/${credentialScope}`,
-    `SignedHeaders=${canonical.signedHeaders}`,
-    `Signature=${signature}`,
-  ].join(", ");
+  return `${algorithm} Credential=${accessKeyId}/${credentialScope}, SignedHeaders=${canonical.signedHeaders}, Signature=${signature}`;
 }
 
-function createCanonicalRequest({ method, url, headers, body }) {
-  const canonicalUri = encodePath(url.pathname || "/");
-  const canonicalQueryString = createCanonicalQueryString(url.searchParams);
-  const canonicalHeaders = createCanonicalHeaders(headers);
-  const payloadHash = sha256Hex(body || "");
-  const canonicalRequest = [
-    method.toUpperCase(),
+function createCanonicalRequest(method, url, headers, body) {
+  let canonicalUri = encodePath(url.pathname || "/");
+  let canonicalQueryString = createCanonicalQueryString(url.searchParams);
+  let canonicalHeaders = createCanonicalHeaders(headers);
+  let payloadHash = sha256Hex(body);
+  let canonicalRequest = [
+    method,
     canonicalUri,
     canonicalQueryString,
     canonicalHeaders.text,
@@ -119,141 +88,133 @@ function createCanonicalRequest({ method, url, headers, body }) {
   ].join("\n");
 
   return {
-    canonicalRequest,
+    canonicalRequest: canonicalRequest,
     signedHeaders: canonicalHeaders.signedHeaders,
   };
 }
 
 function createCanonicalHeaders(headers) {
-  const normalized = Object.entries(headers)
-    .filter(([, value]) => value !== undefined && value !== null)
-    .map(([name, value]) => [
-      name.toLowerCase(),
-      String(value).trim().replace(/\s+/g, " "),
-    ])
-    .sort(([left], [right]) => left.localeCompare(right));
+  let normalized = Object.keys(headers)
+    .map(function (name) {
+      return [
+        name.toLowerCase(),
+        String(headers[name]).trim().replace(/\s+/g, " "),
+      ];
+    })
+    .sort(function (left, right) {
+      return left[0].localeCompare(right[0]);
+    });
+
+  let text = normalized
+    .map(function (item) {
+      return `${item[0]}:${item[1]}`;
+    })
+    .join("\n") + "\n";
+
+  let signedHeaders = normalized
+    .map(function (item) {
+      return item[0];
+    })
+    .join(";");
 
   return {
-    text: normalized.map(([name, value]) => `${name}:${value}`).join("\n") + "\n",
-    signedHeaders: normalized.map(([name]) => name).join(";"),
+    text: text,
+    signedHeaders: signedHeaders,
   };
 }
 
 function createCanonicalQueryString(searchParams) {
-  const pairs = [];
+  let pairs = [];
 
-  for (const [key, value] of searchParams) {
-    pairs.push([awsEncode(key), awsEncode(value)]);
+  for (let pair of searchParams) {
+    pairs.push([awsEncode(pair[0]), awsEncode(pair[1])]);
   }
 
   return pairs
-    .sort(([leftKey, leftValue], [rightKey, rightValue]) => {
-      if (leftKey === rightKey) {
-        return leftValue.localeCompare(rightValue);
+    .sort(function (left, right) {
+      if (left[0] === right[0]) {
+        return left[1].localeCompare(right[1]);
       }
-      return leftKey.localeCompare(rightKey);
+      return left[0].localeCompare(right[0]);
     })
-    .map(([key, value]) => `${key}=${value}`)
+    .map(function (pair) {
+      return `${pair[0]}=${pair[1]}`;
+    })
     .join("&");
 }
 
 function encodePath(pathname) {
   return pathname
     .split("/")
-    .map((segment) => awsEncode(decodeURIComponent(segment)))
+    .map(function (part) {
+      return awsEncode(decodeURIComponent(part));
+    })
     .join("/");
 }
 
 function awsEncode(value) {
-  return encodeURIComponent(value)
-    .replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  return encodeURIComponent(value).replace(/[!'()*]/g, function (char) {
+    return `%${char.charCodeAt(0).toString(16).toUpperCase()}`;
+  });
 }
 
-function getSignatureKey(secretAccessKey, dateStamp, regionName, serviceName) {
-  const dateKey = hmac(`AWS4${secretAccessKey}`, dateStamp);
-  const dateRegionKey = hmac(dateKey, regionName);
-  const dateRegionServiceKey = hmac(dateRegionKey, serviceName);
+function getSignatureKey(secretAccessKey, dateStamp, region, service) {
+  let dateKey = hmac(`AWS4${secretAccessKey}`, dateStamp);
+  let dateRegionKey = hmac(dateKey, region);
+  let dateRegionServiceKey = hmac(dateRegionKey, service);
   return hmac(dateRegionServiceKey, "aws4_request");
 }
 
-function hmac(key, data, encoding) {
-  return crypto.createHmac("sha256", key).update(data, "utf8").digest(encoding);
+function hmac(key, value, encoding) {
+  return crypto.createHmac("sha256", key).update(value, "utf8").digest(encoding);
 }
 
-function sha256Hex(data) {
-  return crypto.createHash("sha256").update(data, "utf8").digest("hex");
+function sha256Hex(value) {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function toAmzDate(date) {
-  return date.toISOString().replace(/[:-]|\.\d{3}/g, "");
-}
-
-function request({ url, method, headers, body, timeoutMs }) {
-  const transport = url.protocol === "http:" ? http : https;
-
-  return new Promise((resolve, reject) => {
-    const req = transport.request(
+function sendRequest(method, url, headers, body) {
+  return new Promise(function (resolve, reject) {
+    let request = https.request(
       {
-        protocol: url.protocol,
         hostname: url.hostname,
-        port: url.port,
+        port: url.port || 443,
         path: `${url.pathname}${url.search}`,
-        method,
+        method: method,
         headers: {
-          ...headers,
+          SOAPAction: headers.SOAPAction,
+          "Content-Type": headers["Content-Type"],
+          "X-Amz-Date": headers["X-Amz-Date"],
+          Authorization: headers.Authorization,
+          Host: headers.Host,
           "Content-Length": Buffer.byteLength(body),
         },
-        timeout: timeoutMs,
       },
-      (res) => {
-        const chunks = [];
+      function (response) {
+        let chunks = [];
 
-        res.on("data", (chunk) => chunks.push(chunk));
-        res.on("end", () => {
-          const responseBody = Buffer.concat(chunks).toString("utf8");
-          const parsedBody = parseResponseBody(responseBody, res.headers["content-type"]);
-          const response = {
-            statusCode: res.statusCode,
-            headers: res.headers,
-            body: parsedBody,
-          };
+        response.on("data", function (chunk) {
+          chunks.push(chunk);
+        });
 
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            resolve(response);
-          } else {
-            const error = new Error(`Payment screening API returned HTTP ${res.statusCode}`);
-            error.response = response;
-            reject(error);
-          }
+        response.on("end", function () {
+          let responseBody = Buffer.concat(chunks).toString("utf8");
+
+          resolve({
+            statusCode: response.statusCode,
+            headers: response.headers,
+            body: responseBody,
+          });
         });
       },
     );
 
-    req.on("timeout", () => req.destroy(new Error(`Payment screening API timed out after ${timeoutMs}ms`)));
-    req.on("error", reject);
-    req.write(body);
-    req.end();
+    request.on("error", reject);
+    request.write(body);
+    request.end();
   });
 }
 
-function parseResponseBody(body, contentType = "") {
-  if (!body) {
-    return null;
-  }
-
-  if (contentType.includes("application/json")) {
-    try {
-      return JSON.parse(body);
-    } catch {
-      return body;
-    }
-  }
-
-  return body;
-}
-
 module.exports = {
-  screenPayment,
-  createAuthorizationHeader,
-  createCanonicalRequest,
+  screenPayment: screenPayment,
 };
